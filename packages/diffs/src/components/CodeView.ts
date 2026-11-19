@@ -3039,7 +3039,14 @@ export class CodeView<LAnnotation = undefined, Caret = undefined> {
     }
     if (immediate) {
       dequeueRender(this.computeRenderRangeAndEmit);
+      const previousSlots = this.slotSnapshot;
       this.computeRenderRangeAndEmit();
+      // React can commit portals after a synchronous render returns from its
+      // layout effect. Measure those rows even if the next render reuses them.
+      if (this.slotSnapshot !== previousSlots) {
+        this.renderState.measurementsPending = true;
+        queueRender(this.computeRenderRangeAndEmit);
+      }
     } else {
       queueRender(this.computeRenderRangeAndEmit);
     }
@@ -5270,8 +5277,9 @@ export class CodeView<LAnnotation = undefined, Caret = undefined> {
           const currentScrollTop = this.getScrollTop();
           const anchor = this.getScrollAnchor(currentScrollTop);
 
+          // The queued render writes the container height. Writing it here can
+          // resize an observed root whose height follows its content.
           this.reconcileRenderedItems();
-          this.updateStickyPositioning();
 
           const anchoredScrollTop =
             anchor != null ? this.resolveAnchoredScrollTop(anchor) : undefined;
@@ -5304,8 +5312,7 @@ export class CodeView<LAnnotation = undefined, Caret = undefined> {
       // portal filling in). Re-measure and, for a header — which lives above the
       // items — re-anchor so the content under the user's eyes doesn't jump,
       // mirroring the stickyContainer branch above. Items are untouched by a host
-      // resize, so we skip reconcileRenderedItems/updateStickyPositioning; the
-      // trailing render() reconciles the range and render window.
+      // resize, so only the sticky-container branch remeasures item heights.
       else if (
         entry.target === this.header.element ||
         entry.target === this.footer.element
@@ -5346,11 +5353,11 @@ export class CodeView<LAnnotation = undefined, Caret = undefined> {
       }
     }
 
-    // If the DOM changed in an unexpected way, we should kick
-    // off a synchronous render immediately because it will
-    // ensure no visual jitter if we need to scroll fix
     if (shouldRender) {
-      this.render(true);
+      // A scroll fix can position the sticky container for the projected window.
+      // Keep the mounted rows anchored until the next frame renders that window.
+      this.updateStickyPositioning();
+      this.render();
     }
   };
 
@@ -5540,28 +5547,36 @@ export class CodeView<LAnnotation = undefined, Caret = undefined> {
     const roundedSyncedScrollTop = roundToDevicePixel(syncedScrollTop);
 
     const { scrollPageOffset: previousPageOffset } = this;
-    const syncedPagedScrollTop = roundToDevicePixel(
-      this.clampPagedScrollTop(roundedSyncedScrollTop - previousPageOffset)
+    const previousPagedScrollTop = roundToDevicePixel(
+      roundedSyncedScrollTop - previousPageOffset
     );
     const { pagedScrollTop, scrollPageOffset } =
       this.resolvePagedScrollPosition(roundedTargetScrollTop);
     const targetPagedScrollTop = pagedScrollTop;
 
+    // Chrome can clamp scrollTop when the scaffold shrinks, then keep that
+    // position if measuring rows grows it again. Compare with the position
+    // captured before the range changed.
+    const shouldScroll = targetPagedScrollTop !== previousPagedScrollTop;
     const rebaseChanged = previousPageOffset !== scrollPageOffset;
     if (
       roundedTargetScrollTop === this.renderState.scrollTop &&
       roundedTargetScrollTop === roundedSyncedScrollTop &&
-      targetPagedScrollTop === syncedPagedScrollTop &&
+      !shouldScroll &&
       !rebaseChanged
     ) {
       return;
     }
     this.suspendScrollInteractions();
-    if (targetPagedScrollTop !== syncedPagedScrollTop || rebaseChanged) {
+    if (shouldScroll || rebaseChanged) {
       this.scrollPageOffset = scrollPageOffset;
-      this.syncPagedScrollScaffolding(windowSpecs);
+      // Scrolling to the top of an empty range needs no scaffold write. Let
+      // the queued render resize a content-sized root outside resize delivery.
+      if (this.getMaxPagedScrollTop() > 0) {
+        this.syncPagedScrollScaffolding(windowSpecs);
+      }
     }
-    if (targetPagedScrollTop !== syncedPagedScrollTop) {
+    if (shouldScroll) {
       this.root.scrollTo({ top: targetPagedScrollTop, behavior: 'instant' });
     }
     // Keep cached scroll state in sync with writes we performed ourselves, so

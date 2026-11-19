@@ -43,10 +43,11 @@
       const params = new URLSearchParams(location.search);
       const type = params.get('type') === 'file' ? 'file' : 'diff';
       const heights = params.get('multiple') === 'true' ? [40, 80] : [80];
+      const lineCount = Number(params.get('lines') ?? 200);
       const file = {
         name: 'annotations.ts',
         contents: Array.from(
-          { length: 200 },
+          { length: lineCount },
           (_, index) => `const line${index + 1} = ${index + 1};`
         ).join('\n'),
       };
@@ -64,7 +65,7 @@
               ),
             }),
         annotations: heights.map((height, index) => ({
-          lineNumber: 191 - heights.length + index,
+          lineNumber: lineCount - 9 - heights.length + index,
           side: 'additions',
           metadata: { height, label: `Existing comment ${index + 1}` },
         })),
@@ -144,6 +145,20 @@
         viewer = new CodeView(viewerOptions);
         viewer.setup(root);
         viewer.setItems([item]);
+        if (params.get('followingDiff') === 'true') {
+          const contents = file.contents.split('\n').slice(0, 28).join('\n');
+          const following = { name: 'following.ts', contents };
+          viewer.addItems([
+            {
+              id: 'following',
+              type: 'diff',
+              fileDiff: parseDiffFromFile(
+                { ...following, contents: contents.replaceAll('const', 'let') },
+                following
+              ),
+            },
+          ]);
+        }
       }
 
       // Exercise each owner's normal update path, including React's layout

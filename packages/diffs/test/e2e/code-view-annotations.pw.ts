@@ -189,6 +189,132 @@ test.describe('CodeView annotation scroll anchoring', () => {
     expect(errors).toEqual([]);
   });
 
+  test('lets the root grow and shrink with an annotation under max-height without a resize loop', async ({
+    page,
+  }) => {
+    await page.goto(
+      '/test/e2e/fixtures/code-view-annotations.html?type=file&lines=12'
+    );
+    const root = page.locator('[data-code-view-root]');
+    const comment = root.locator('[data-test-annotation]');
+    await expect(comment).toBeVisible();
+    await root.evaluate((root) => {
+      root.style.height = 'auto';
+      root.style.maxHeight = '600px';
+    });
+    await expect
+      .poll(() => root.evaluate((root) => root.clientHeight))
+      .toBeLessThan(600);
+    const before = await root.evaluate((root) => root.clientHeight);
+    expect(before + 64).toBeLessThan(600);
+    expect(before + 300).toBeGreaterThan(600);
+    const loops = await page.evaluateHandle(() => {
+      const messages: string[] = [];
+      window.addEventListener('error', ({ message }) => {
+        if (message.includes('ResizeObserver loop')) messages.push(message);
+      });
+      return messages;
+    });
+    for (const delta of [64, 300, 0]) {
+      await comment.evaluate((el, delta) => {
+        (el as HTMLElement).style.height = `${80 + delta}px`;
+      }, delta);
+      await expect
+        .poll(() => root.evaluate((root) => root.clientHeight))
+        .toBe(Math.min(before + delta, 600));
+      if (delta === 300) {
+        await root.evaluate((root) => {
+          root.scrollTop = root.scrollHeight;
+        });
+        await expect
+          .poll(() => root.evaluate((root) => root.scrollTop))
+          .toBeGreaterThan(0);
+      }
+    }
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    expect(await loops.jsonValue()).toEqual([]);
+  });
+
+  for (const position of ['mid-file', 'at the bottom'] as const) {
+    test(`keeps both split columns anchored ${position} as a comment in the preceding file resizes`, async ({
+      page,
+    }) => {
+      // The comment in the preceding file resizes CodeView without involving
+      // ResizeManager's synchronization of paired annotation rows.
+      await page.goto(
+        '/test/e2e/fixtures/code-view-annotations.html?type=file&followingDiff=true'
+      );
+      await expect(page.locator('[data-line="1"]').first()).toBeVisible();
+      await page.locator('[data-code-view-root]').evaluate((root) => {
+        root.scrollTop = root.scrollHeight;
+      });
+      await waitForAnnotationHeight(page, 80);
+      await setDistanceFromBottom(page, position === 'mid-file' ? 100 : 0);
+      await page.waitForFunction(() => {
+        const root = window.__annotationScroll?.root;
+        const comment = root?.querySelector('[data-test-annotation]');
+        return (
+          root != null &&
+          comment != null &&
+          comment.getBoundingClientRect().height === 80 &&
+          comment.getBoundingClientRect().bottom <
+            root.getBoundingClientRect().top
+        );
+      });
+      const samples = await page.evaluate(async () => {
+        const root = window.__annotationScroll?.root;
+        const comment = root?.querySelector<HTMLElement>(
+          '[data-test-annotation]'
+        );
+        if (root == null || comment == null) {
+          throw new Error('Missing annotation fixture.');
+        }
+        const rowTops = () =>
+          Array.from(
+            root
+              .querySelectorAll('diffs-container')[1]
+              ?.shadowRoot?.querySelectorAll('[data-code] [data-line="10"]') ??
+              [],
+            (row) => row.getBoundingClientRect().top
+          );
+        await new Promise(requestAnimationFrame);
+        const viewport = root.getBoundingClientRect();
+        const before = {
+          tops: rowTops(),
+          scroll: root.scrollTop,
+          viewportTop: viewport.top,
+          viewportBottom: viewport.bottom,
+        };
+        const frames = [];
+        const scrollPositions = [];
+        for (const height of [144, 80]) {
+          comment.style.height = `${height}px`;
+          for (let frame = 0; frame < 4; frame++) {
+            await new Promise(requestAnimationFrame);
+            frames.push(rowTops());
+          }
+          scrollPositions.push(root.scrollTop);
+        }
+        return { before, frames, scrollPositions };
+      });
+      expect(samples.before.tops).toHaveLength(2);
+      expect(samples.before.tops[0]).toBe(samples.before.tops[1]);
+      expect(samples.before.tops[0]).toBeGreaterThanOrEqual(
+        samples.before.viewportTop
+      );
+      expect(samples.before.tops[0]).toBeLessThan(
+        samples.before.viewportBottom
+      );
+      for (const tops of samples.frames) {
+        expect(tops).toEqual(samples.before.tops);
+      }
+      expect(samples.scrollPositions).toEqual([
+        samples.before.scroll + 64,
+        samples.before.scroll,
+      ]);
+    });
+  }
+
   for (const type of ['file', 'diff'] as const) {
     for (const { name, query } of [
       { name: 'controlled React props', query: '&react=controlled' },
